@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -32,13 +34,27 @@ func NewRouter(store *Store, cfg *Config) http.Handler {
 	mux.HandleFunc("/api/v1/auth/login", a.loginHandler)
 	mux.HandleFunc("/api/v1/dashboard", a.dashboardHandler)
 	mux.HandleFunc("/api/v1/blocks", a.blocksHandler)
+	mux.HandleFunc("/api/v1/blocks/stats", a.blockchainStatsHandler)
 	mux.HandleFunc("/api/v1/validators", a.validatorsHandler)
 	mux.HandleFunc("/api/v1/sentience/learn", a.learnHandler)
 	mux.HandleFunc("/api/v1/sentience/docs", a.docsHandler)
 	mux.HandleFunc("/api/v1/invest", a.investHandler)
 	mux.HandleFunc("/api/v1/minecraft", a.minecraftHandler)
+	mux.HandleFunc("/api/v1/minecraft/hosting", a.minecraftHostingHandler)
+	mux.HandleFunc("/api/v1/minecraft/launcher", a.minecraftLauncherHandler)
 
-	return a.chain(mux)
+	apiMux := a.chain(mux)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Route API requests to the API mux
+		if strings.HasPrefix(r.URL.Path, "/api") {
+			apiMux.ServeHTTP(w, r)
+			return
+		}
+
+		// Serve static files for everything else
+		a.serveStatic(w, r)
+	})
 }
 
 func (a *API) chain(next http.Handler) http.Handler {
@@ -219,6 +235,33 @@ func (a *API) blocksHandler(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, map[string]any{"blocks": blocks})
 }
 
+func (a *API) blockchainStatsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		a.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	blockCount, _ := a.store.CountBlocks()
+	validators, _ := a.store.ListValidators()
+	blocks, _ := a.store.ListBlocks()
+
+	var latestBlockTime time.Time
+	if len(blocks) > 0 {
+		latestBlockTime = blocks[0].Timestamp
+	}
+
+	stats := map[string]any{
+		"total_blocks":      blockCount,
+		"active_validators": len(validators),
+		"latest_block_time": latestBlockTime,
+		"network_status":    "operational",
+		"consensus":         "Proof of Stake",
+		"block_time":        "15s",
+		"total_stake":       266865.7,
+	}
+	a.writeJSON(w, http.StatusOK, stats)
+}
+
 func (a *API) validatorsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		a.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -289,6 +332,65 @@ func (a *API) minecraftHandler(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, map[string]any{"minecraft": servers})
 }
 
+func (a *API) minecraftHostingHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		a.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	servers, err := a.store.ListMinecraftServers()
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, "failed to load minecraft servers")
+		return
+	}
+
+	hosting := map[string]any{
+		"service": "Sphere Minecraft Hosting",
+		"status":  "operational",
+		"infrastructure": map[string]any{
+			"provider": "Sphere Cloud",
+			"regions":  []string{"us-east", "eu-west", "asia-pacific"},
+			"uptime":   "99.9%",
+		},
+		"servers": servers,
+		"capacity": map[string]any{
+			"total_slots":    500,
+			"active_players": 234,
+			"average_tps":    19.8,
+		},
+		"features": []string{
+			"24/7 monitoring",
+			"Automatic backups",
+			"DDoS protection",
+			"Custom plugins support",
+			"World transfer assistance",
+		},
+	}
+	a.writeJSON(w, http.StatusOK, hosting)
+}
+
+func (a *API) minecraftLauncherHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		a.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	servers, err := a.store.ListMinecraftServers()
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, "failed to load servers")
+		return
+	}
+
+	launcher := map[string]any{
+		"game":     "minecraft",
+		"version":  "1.20.x",
+		"servers":  servers,
+		"launcher": "https://launcher.thesphere.online",
+		"status":   "ready_to_play",
+	}
+	a.writeJSON(w, http.StatusOK, launcher)
+}
+
 func (a *API) readJSON(body io.ReadCloser, dst any) error {
 	defer body.Close()
 	decoder := json.NewDecoder(body)
@@ -305,6 +407,50 @@ func (a *API) writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func (a *API) writeError(w http.ResponseWriter, status int, message string) {
 	a.writeJSON(w, status, map[string]any{"error": message})
+}
+
+func (a *API) serveStatic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Resolve the file path from the frontend dist directory
+	distDir := filepath.Join("frontend", "dist")
+	path := filepath.Join(distDir, filepath.Clean(r.URL.Path))
+
+	// Prevent directory traversal
+	if !strings.HasPrefix(path, distDir) {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Check if the file exists
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// For SPA routing: serve index.html for non-existent files
+			indexPath := filepath.Join(distDir, "index.html")
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	// If it's a directory, try to serve index.html from that directory
+	if info.IsDir() {
+		indexPath := filepath.Join(path, "index.html")
+		if _, err := os.Stat(indexPath); err == nil {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		http.NotFound(w, r)
+		return
+	}
+
+	// Serve the file
+	http.ServeFile(w, r, path)
 }
 
 func validUsername(name string) bool {

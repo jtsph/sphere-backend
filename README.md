@@ -18,6 +18,11 @@ The backend is implemented as a single Go service with:
 - `handlers.go` — REST endpoints, secure headers, rate limiting, and request logging
 - `models.go` — typed domain models for blocks, validators, users, learn content, investment products, and servers
 
+## Frontend
+
+A companion frontend app is available under `frontend/`.
+It is built with Vite, React, TypeScript, and proxies `/api` requests to the local backend.
+
 ## Running locally
 
 1. Install Go 1.22 or later.
